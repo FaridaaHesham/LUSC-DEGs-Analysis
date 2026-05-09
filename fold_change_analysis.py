@@ -3,11 +3,11 @@
 # Main entry point — Fold Change Analysis & Volcano Plot
 #
 # Pipeline:
-#   1. Load Member 1's output (all_genes_results.csv)
+#   1. Load statistical analysis output (all_genes_results.csv)
 #   2. Apply dual-threshold DEG filtering (|log2FC|>1, p_adj<0.05)
-#   3. Compare filtered list against Member 1's p-value-only list
+#   3. Compare filtered list against statistical p-value-only list
 #   4. Draw and save the volcano plot  (via volcano_plot.py)
-#   5. Export final DEG list for Member 3 / GSEA
+#   5. Export final DEG list for GSEA
 #
 # Run:
 #   python fold_change_analysis.py
@@ -18,6 +18,8 @@ import numpy as np
 import os
 
 from volcano_plot import build_volcano_plot
+from bar_plot import build_bar_plot
+from heatmap_plot import build_heatmap
 
 # ── Configuration ─────────────────────────────────────────────
 FC_THRESHOLD   = 1.0    # |log2FC| > 1  ->  at least 2x fold change
@@ -27,9 +29,14 @@ TOP_N_LABELS   = 15     # gene names to annotate on the volcano plot
 INPUT_CSV      = "outputs/all_genes_results.csv"
 OUTPUT_DEG_CSV = "outputs/DEGs_volcano_filtered.csv"
 OUTPUT_FIGURE  = "outputs/figures/volcano_plot.png"
+OUTPUT_BAR_PLOT = "outputs/figures/bar_plot.png"
+OUTPUT_HEATMAP = "outputs/figures/heatmap_plot.png"
+
+RAW_TUMOR_FILE = "lusc-rsem-fpkm-tcga-t_paired.txt"
+RAW_NORMAL_FILE = "lusc-rsem-fpkm-tcga_paired.txt"
 
 # ═══════════════════════════════════════════════════════════════
-# STEP 1 — Load & Validate Member 1's Output
+# STEP 1 — Load & Validate Statistical Analysis Output
 # ═══════════════════════════════════════════════════════════════
 
 print("=" * 60)
@@ -38,7 +45,7 @@ print("=" * 60)
 
 assert os.path.exists(INPUT_CSV), (
     f"\n[ERROR] '{INPUT_CSV}' not found.\n"
-    "Run main.py (Member 1's script) first to generate outputs/."
+    "Run statistical_analysis.py first to generate outputs/."
 )
 
 df = pd.read_csv(INPUT_CSV)
@@ -49,7 +56,7 @@ assert not missing, f"[ERROR] Missing columns in input: {missing}"
 
 for col in ['log2FC', 'p_adj']:
     assert df[col].isna().sum() == 0, \
-        f"[ERROR] Column '{col}' has NaN values — check Member 1's output."
+        f"[ERROR] Column '{col}' has NaN values — check statistical analysis output."
 
 print(f"\n  Input file:   {INPUT_CSV}")
 print(f"  Total genes:  {len(df):,}")
@@ -63,7 +70,7 @@ print()
 #   (1) Statistical: p_adj < 0.05  — controls false discovery rate
 #   (2) Biological:  |log2FC| > 1  — at least 2× expression change
 #
-# Using statistical significance alone (Member 1's approach) can
+# Using statistical significance alone can
 # flag genes with tiny expression differences as significant when
 # sample size is large (n=51). The FC threshold removes such
 # statistically detectable but biologically irrelevant genes.
@@ -90,27 +97,30 @@ print(f"  Not significant:     {(df['category'] == 'Not Significant').sum():,}")
 print()
 
 # ═══════════════════════════════════════════════════════════════
-# STEP 3 — Compare Against Member 1's DEG List
+# STEP 3 — Compare Against Statistical DEG List
 # ═══════════════════════════════════════════════════════════════
 #
-# Member 1 flags genes with p_adj < 0.05 only (column 'significant').
+# Statistical analysis flags genes with p_adj < 0.05 only (column 'significant').
 # Our list additionally requires |log2FC| > 1.
 # By definition, our list is always a strict subset of theirs.
 
-n_member1 = df['significant'].sum()
-n_removed  = n_member1 - n_degs
-pct_removed = (n_removed / n_member1 * 100) if n_member1 > 0 else 0
+n_stat_only = df['significant'].sum()
+n1_up = ((df['significant']) & (df['log2FC'] > 0)).sum()
+n1_down = ((df['significant']) & (df['log2FC'] < 0)).sum()
 
-# Sanity check: every DEG we report must also be in Member 1's list
+n_removed  = n_stat_only - n_degs
+pct_removed = (n_removed / n_stat_only * 100) if n_stat_only > 0 else 0
+
+# Sanity check: every DEG we report must also be in the Statistical list
 our_genes    = set(df.loc[df['category'] != 'Not Significant', 'gene'])
-member1_genes = set(df.loc[df['significant'], 'gene'])
-assert our_genes <= member1_genes, \
-    "[ERROR] Some Member 2 DEGs are NOT in Member 1's list — check threshold logic."
+sig_only_genes = set(df.loc[df['significant'], 'gene'])
+assert our_genes <= sig_only_genes, \
+    "[ERROR] Some Dual-Threshold DEGs are NOT in the Statistical list — check threshold logic."
 
 print("=" * 60)
-print("COMPARISON WITH MEMBER 1's LIST")
+print("COMPARISON WITH STATISTICAL LIST")
 print("=" * 60)
-print(f"  Member 1 DEGs  (p_adj < {PADJ_THRESHOLD} only):    {n_member1:,}")
+print(f"  Statistical DEGs (p_adj < {PADJ_THRESHOLD} only):    {n_stat_only:,}")
 print(f"  Our DEGs       (+ |log2FC| > {FC_THRESHOLD}):       {n_degs:,}")
 print(f"  Removed by FC filter:               {n_removed:,}  ({pct_removed:.1f}%)")
 print(f"  Subset check:                       PASSED — 100% overlap confirmed")
@@ -138,10 +148,57 @@ top_labeled = build_volcano_plot(
 print()
 
 # ═══════════════════════════════════════════════════════════════
-# STEP 5 — Export DEG List for Member 3 (GSEA Input)
+# STEP 4.5 — Bar Plot
+# ═══════════════════════════════════════════════════════════════
+
+print("=" * 60)
+print("BAR PLOT")
+print("=" * 60)
+
+build_bar_plot(
+    n1_up=n1_up,
+    n1_down=n1_down,
+    n2_up=n_up,
+    n2_down=n_down,
+    output_path=OUTPUT_BAR_PLOT
+)
+print()
+
+# ═══════════════════════════════════════════════════════════════
+# STEP 4.75 — Heatmap Plot
+# ═══════════════════════════════════════════════════════════════
+
+print("=" * 60)
+print("HEATMAP PLOT")
+print("=" * 60)
+
+# Load raw expression data
+if os.path.exists(RAW_TUMOR_FILE) and os.path.exists(RAW_NORMAL_FILE):
+    tumor_df = pd.read_csv(RAW_TUMOR_FILE, sep='\t', index_col=0)
+    normal_df = pd.read_csv(RAW_NORMAL_FILE, sep='\t', index_col=0)
+    
+    # Get top 30 genes by absolute log2 fold change among the significant DEGs
+    # (Using Member 2's dual-threshold filter criteria)
+    df_sig = df[df['category'] != 'Not Significant'].copy()
+    df_sig['abs_log2FC'] = df_sig['log2FC'].abs()
+    top_30_genes = df_sig.nlargest(30, 'abs_log2FC')['gene'].tolist()
+    
+    build_heatmap(
+        tumor_df=tumor_df,
+        normal_df=normal_df,
+        top_genes=top_30_genes,
+        output_path=OUTPUT_HEATMAP
+    )
+else:
+    print(f"[WARNING] Raw expression files not found. Skipping heatmap generation.")
+
+print()
+
+# ═══════════════════════════════════════════════════════════════
+# STEP 5 — Export DEG List for GSEA Input
 # ═══════════════════════════════════════════════════════════════
 #
-# Member 3 will feed this CSV into GSEA / Enrichr.
+# We will feed this CSV into GSEA / Enrichr.
 # Gene names are HUGO symbols — the expected format for both tools.
 # Sorted by p_adj ascending so the most significant genes are first.
 
@@ -159,9 +216,13 @@ print("=" * 60)
 print("EXPORTS")
 print("=" * 60)
 print(f"  {OUTPUT_DEG_CSV}")
-print(f"    -> {len(degs_export):,} DEGs  (input for Member 3 / GSEA)")
+print(f"    -> {len(degs_export):,} DEGs  (input for GSEA)")
 print(f"  {OUTPUT_FIGURE}")
 print(f"    -> Volcano plot  (300 DPI)")
+print(f"  {OUTPUT_BAR_PLOT}")
+print(f"    -> Bar plot      (300 DPI)")
+print(f"  {OUTPUT_HEATMAP}")
+print(f"    -> Heatmap plot  (300 DPI)")
 print()
 
 # ═══════════════════════════════════════════════════════════════
@@ -172,10 +233,10 @@ print("=" * 60)
 print("FINAL SUMMARY")
 print("=" * 60)
 print(f"  Genes analysed:              {len(df):,}")
-print(f"  FC threshold:                |log2FC| > {FC_THRESHOLD}  (≥ {2**FC_THRESHOLD:.0f}× change)")
+print(f"  FC threshold:                |log2FC| > {FC_THRESHOLD}  (>= {2**FC_THRESHOLD:.0f}x change)")
 print(f"  Significance threshold:      p_adj < {PADJ_THRESHOLD}  (BH / FDR)")
 print()
-print(f"  Member 1 DEGs (stat only):   {n_member1:,}")
+print(f"  Statistical DEGs (stat only):{n_stat_only:,}")
 print(f"  Final DEGs (dual-threshold): {n_degs:,}  ({pct_removed:.1f}% reduction)")
 print(f"  [UP]   Upregulated:          {n_up:,}")
 print(f"  [DOWN] Downregulated:        {n_down:,}")
